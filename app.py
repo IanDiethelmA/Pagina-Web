@@ -749,23 +749,31 @@ def extract_nlp_tags(row: pd.Series) -> str:
 
 
 def check_system_health() -> Tuple[bool, str]:
-    """Verifica que 'data/chileautos_arbitraje.db' y 'models/model.pkl' estén operativos."""
-    if not config.DB_PATH.exists():
-        return False, "No se encontró la base de datos SQLite ('data/chileautos_arbitraje.db')."
+    """Verifica que la base de datos (Supabase o SQLite) y 'models/model.pkl' estén operativos."""
+    if config.DATABASE_URL:
+        try:
+            stats = DatabaseManager(database_url=config.DATABASE_URL).get_summary_stats()
+            if int(stats.get("total_historicos") or 0) == 0:
+                return False, "La base de datos Supabase está vacía (0 vehículos registrados)."
+        except Exception as exc:
+            return False, f"Error verificando Supabase PostgreSQL: {exc}"
+    else:
+        if not config.DB_PATH.exists():
+            return False, "No se encontró la base de datos SQLite ('data/chileautos_arbitraje.db')."
 
-    try:
-        with closing(sqlite3.connect(str(config.DB_PATH))) as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='autos_historico'"
-            )
-            if cur.fetchone() is None:
-                return False, "La tabla 'autos_historico' aún no existe en la base de datos."
-            cur.execute("SELECT COUNT(*) FROM autos_historico")
-            if cur.fetchone()[0] == 0:
-                return False, "La base de datos está vacía (0 vehículos registrados)."
-    except Exception as exc:
-        return False, f"Error verificando SQLite: {exc}"
+        try:
+            with closing(sqlite3.connect(str(config.DB_PATH))) as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='autos_historico'"
+                )
+                if cur.fetchone() is None:
+                    return False, "La tabla 'autos_historico' aún no existe en la base de datos."
+                cur.execute("SELECT COUNT(*) FROM autos_historico")
+                if cur.fetchone()[0] == 0:
+                    return False, "La base de datos está vacía (0 vehículos registrados)."
+        except Exception as exc:
+            return False, f"Error verificando SQLite: {exc}"
 
     if not config.MODEL_PATH.exists():
         return False, "No se encontró el artefacto del modelo IA ('models/model.pkl')."
@@ -787,7 +795,7 @@ def load_cached_predictor(model_mtime: float) -> Tuple[CarPricePredictor, Dict[s
     return predictor, metadata
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, ttl=120)
 def load_dashboard_datasets(
     db_mtime: float,
     model_mtime: float,
@@ -795,7 +803,7 @@ def load_dashboard_datasets(
     opp_csv_mtime: float,
 ) -> Dict[str, Any]:
     """
-    Carga y enriquece todos los datasets del sistema en una sola pasada (SQLite histórico,
+    Carga y enriquece todos los datasets del sistema en una sola pasada (Supabase o SQLite,
     activos deduplicados multiplataforma, autos_clean.csv, oportunidades_detectadas.csv
     y rebajas de precio_historial). Comparte DataFrames zero-copy en memoria (@st.cache_resource);
     los consumidores no deben mutar los DataFrames retornados sin copiar.
@@ -806,42 +814,35 @@ def load_dashboard_datasets(
     predictor, model_meta = load_cached_predictor(model_mtime)
 
     today_prefix = datetime.now().strftime("%Y-%m-%d")
-    with closing(sqlite3.connect(str(config.DB_PATH))) as conn:
-        full_df = pd.read_sql_query(
-            "SELECT * FROM autos_historico ORDER BY fecha_ultima_vista DESC", conn
+    full_df = db_manager.read_dataframe(
+        "SELECT * FROM autos_historico ORDER BY fecha_ultima_vista DESC"
+    )
+    try:
+        price_history_df = db_manager.read_dataframe(
+            """
+            SELECT ph.id, ph.id_aviso, a.marca, a.modelo, a.anio, a.kilometraje,
+                   a.comuna, a.estado, ph.precio_antiguo, ph.precio_nuevo,
+                   (ph.precio_nuevo - ph.precio_antiguo) AS variacion_clp,
+                   ph.fecha_cambio, a.url
+            FROM precio_historial ph
+            LEFT JOIN autos_historico a ON ph.id_aviso = a.id_aviso
+            ORDER BY ph.fecha_cambio DESC
+            LIMIT 400
+            """
         )
-        try:
-            price_history_df = pd.read_sql_query(
-                """
-                SELECT ph.id, ph.id_aviso, a.marca, a.modelo, a.anio, a.kilometraje,
-                       a.comuna, a.estado, ph.precio_antiguo, ph.precio_nuevo,
-                       (ph.precio_nuevo - ph.precio_antiguo) AS variacion_clp,
-                       ph.fecha_cambio, a.url
-                FROM precio_historial ph
-                LEFT JOIN autos_historico a ON ph.id_aviso = a.id_aviso
-                ORDER BY ph.fecha_cambio DESC
-                LIMIT 400
-                """,
-                conn,
+        if not price_history_df.empty:
+            price_history_df["variacion_pct"] = np.where(
+                price_history_df["precio_antiguo"] > 0,
+                (
+                    (price_history_df["variacion_clp"] / price_history_df["precio_antiguo"]) * 100.0
+                ).round(1),
+                0.0,
             )
-            if not price_history_df.empty:
-                price_history_df["variacion_pct"] = np.where(
-                    price_history_df["precio_antiguo"] > 0,
-                    (
-                        (price_history_df["variacion_clp"] / price_history_df["precio_antiguo"]) * 100.0
-                    ).round(1),
-                    0.0,
-                )
-                price_history_df = _assign_portal_and_region_columns(price_history_df)
-        except Exception:
-            price_history_df = pd.DataFrame()
+            price_history_df = _assign_portal_and_region_columns(price_history_df)
+    except Exception:
+        price_history_df = pd.DataFrame()
 
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT COUNT(*) FROM autos_historico WHERE estado = 'vendido' AND fecha_venta LIKE ?",
-            (f"{today_prefix}%",),
-        )
-        sold_today = int(cur.fetchone()[0])
+    sold_today = db_manager.get_sold_today_count(today_prefix)
 
     summary_stats = db_manager.get_summary_stats()
     summary_stats["vendidos_hoy"] = sold_today
@@ -4341,7 +4342,11 @@ def main() -> None:
         return
 
     try:
-        db_mtime = config.DB_PATH.stat().st_mtime
+        db_mtime = (
+            float(st.session_state.get("_db_cache_nonce", 0.0))
+            if config.DATABASE_URL
+            else config.DB_PATH.stat().st_mtime
+        )
         model_mtime = config.MODEL_PATH.stat().st_mtime
         clean_csv_path = config.DATA_DIR / "autos_clean.csv"
         opp_csv_path = config.DATA_DIR / "oportunidades_detectadas.csv"

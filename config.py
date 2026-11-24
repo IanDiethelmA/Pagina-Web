@@ -65,6 +65,7 @@ for directory in (DATA_DIR, MODELS_DIR, LOGS_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
 DB_PATH = DATA_DIR / "chileautos_arbitraje.db"
+DATABASE_URL = _get_secret("DATABASE_URL", "")
 MODEL_PATH = MODELS_DIR / "model.pkl"
 CLEAN_DATA_PATH = DATA_DIR / "autos_clean.parquet"
 LOG_FILE_PATH = LOGS_DIR / "system.log"

@@ -55,15 +55,22 @@ class CarDataPipeline:
         Lee los registros desde la tabla 'autos_historico' en SQLite usando Pandas.
         Por defecto carga los anuncios con estado = 'activo'.
         """
-        if not self.db_path.exists():
-            raise FileNotFoundError(f"No se encontró la base de datos en {self.db_path}")
-
         query = "SELECT * FROM autos_historico"
         if only_active:
             query += " WHERE estado = 'activo'"
 
-        with closing(sqlite3.connect(str(self.db_path))) as conn:
-            df = pd.read_sql_query(query, conn)
+        use_pg = bool(config.DATABASE_URL) and (
+            self.db_path.resolve() == Path(config.DB_PATH).resolve()
+        )
+        if use_pg:
+            from database import DatabaseManager
+
+            df = DatabaseManager(database_url=config.DATABASE_URL).read_dataframe(query)
+        else:
+            if not self.db_path.exists():
+                raise FileNotFoundError(f"No se encontró la base de datos en {self.db_path}")
+            with closing(sqlite3.connect(str(self.db_path))) as conn:
+                df = pd.read_sql_query(query, conn)
 
         logger.info(
             "Cargados %d registros desde SQLite (%s).",
