@@ -161,8 +161,8 @@ TARGET_SEGMENTS = [
 ]
 
 
-def load_custom_segments() -> List[Tuple[str, str]]:
-    """Lee las marcas y modelos personalizados agregados desde la interfaz UI."""
+def _load_custom_segments_from_json() -> List[Tuple[str, str]]:
+    """Lee segmentos personalizados desde el archivo JSON local de respaldo."""
     if not CUSTOM_SEGMENTS_PATH.exists():
         return []
     try:
@@ -178,8 +178,30 @@ def load_custom_segments() -> List[Tuple[str, str]]:
         return []
 
 
+def load_custom_segments() -> List[Tuple[str, str]]:
+    """Lee las marcas y modelos personalizados desde DB (si DATABASE_URL está activo) con fallback a JSON."""
+    json_segments = _load_custom_segments_from_json()
+    if str(DATABASE_URL or "").strip():
+        try:
+            db_mod = sys.modules.get("database")
+            if db_mod is None or hasattr(db_mod, "DatabaseManager"):
+                from database import DatabaseManager
+
+                db_segments = DatabaseManager().get_custom_segments()
+                merged: List[Tuple[str, str]] = []
+                seen = set()
+                for pair in [*db_segments, *json_segments]:
+                    if pair not in seen:
+                        merged.append(pair)
+                        seen.add(pair)
+                return merged
+        except Exception:
+            pass
+    return json_segments
+
+
 def get_all_target_segments() -> List[Tuple[str, str]]:
-    """Devuelve la unión sin duplicados de TARGET_SEGMENTS + custom_segments.json."""
+    """Devuelve la unión sin duplicados de TARGET_SEGMENTS + segmentos personalizados."""
     combined = list(TARGET_SEGMENTS)
     existing = set(combined)
     for pair in load_custom_segments():
@@ -212,7 +234,7 @@ MODEL_ALIASES = {
 
 
 def add_custom_segment(marca: str, modelo: str) -> Tuple[bool, str]:
-    """Agrega una nueva dupla (Marca, Modelo) desde la UI y la persiste en disco."""
+    """Agrega una nueva dupla (Marca, Modelo) desde la UI y la persiste en DB o JSON local."""
     m = str(marca or "").strip().upper()
     mod = str(modelo or "").strip().upper()
     if not m or not mod:
@@ -220,25 +242,36 @@ def add_custom_segment(marca: str, modelo: str) -> Tuple[bool, str]:
 
     pair = (m, mod)
     current_all = set(get_all_target_segments())
-    custom_list = load_custom_segments()
-    if pair not in set(custom_list) and pair not in set(TARGET_SEGMENTS):
-        custom_list.append(pair)
-        CUSTOM_SEGMENTS_PATH.write_text(
-            json.dumps(custom_list, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+    if pair in current_all:
+        if pair not in TARGET_SEGMENTS:
+            TARGET_SEGMENTS.append(pair)
+        return True, f"El modelo {m} {mod} ya está activo en el catálogo."
+
+    persisted_in_db = False
+    if str(DATABASE_URL or "").strip():
+        try:
+            db_mod = sys.modules.get("database")
+            if db_mod is None or hasattr(db_mod, "DatabaseManager"):
+                from database import DatabaseManager
+
+                persisted_in_db = bool(DatabaseManager().add_custom_segment_db(m, mod))
+        except Exception:
+            persisted_in_db = False
+
+    if not persisted_in_db:
+        custom_list = _load_custom_segments_from_json()
+        if pair not in set(custom_list) and pair not in set(TARGET_SEGMENTS):
+            custom_list.append(pair)
+            CUSTOM_SEGMENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            CUSTOM_SEGMENTS_PATH.write_text(
+                json.dumps(custom_list, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
     if pair not in TARGET_SEGMENTS:
         TARGET_SEGMENTS.append(pair)
 
-    if pair in current_all:
-        return True, f"El modelo {m} {mod} ya está activo en el catálogo."
     return True, f"Marca/Modelo '{m} {mod}' añadido exitosamente al catálogo."
-
-
-# Fusionar automáticamente segmentos personalizados al cargar config.py
-for _custom_pair in load_custom_segments():
-    if _custom_pair not in TARGET_SEGMENTS:
-        TARGET_SEGMENTS.append(_custom_pair)
 
 SCRAPER_MAX_PAGES = int(os.getenv("SCRAPER_MAX_PAGES", "5"))
 SCRAPER_PAGES_PER_SEGMENT = int(os.getenv("SCRAPER_PAGES_PER_SEGMENT", "2"))
@@ -617,3 +650,15 @@ GOOGLE_CSE_CX = _get_secret("GOOGLE_CSE_CX", "")
 SERPER_API_KEY = _get_secret("SERPER_API_KEY", "")
 # Páginas de 10 resultados por consulta (cada página consume 1 crédito de Serper)
 SERPER_PAGES_PER_QUERY = int(_get_secret("SERPER_PAGES_PER_QUERY", "2") or "2")
+
+# Seguridad de acceso de operador y cooldown entre escaneos en vivo
+ADMIN_ACCESS_CODE = _get_secret("ADMIN_ACCESS_CODE", "")
+try:
+    SCAN_COOLDOWN_SECONDS = max(0, int(_get_secret("SCAN_COOLDOWN_SECONDS", "45") or "45"))
+except ValueError:
+    SCAN_COOLDOWN_SECONDS = 45
+
+# Fusionar automáticamente segmentos personalizados al cargar config.py
+for _custom_pair in load_custom_segments():
+    if _custom_pair not in TARGET_SEGMENTS:
+        TARGET_SEGMENTS.append(_custom_pair)
