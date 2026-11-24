@@ -1,0 +1,39 @@
+# Variables de entorno y secretos (no subir claves reales a GitHub)
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+*.pem
+*.key
+
+# Entornos virtuales y caches de Python / Node
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+ENV/
+node_modules/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Logs, temporales SQLite WAL y archivos temporales de importacion
+logs/
+*.log
+*.db-wal
+*.db-shm
+*.db-journal
+data/import_chileautos/
+
+# Archivos de sistema operativo y editores
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
+*.bak
+*.swp
+.vscode/
+.idea/
