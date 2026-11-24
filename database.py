@@ -6,6 +6,7 @@ de días publicados.
 """
 
 import logging
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -94,6 +95,10 @@ class DatabaseManager:
             self.database_url = str(getattr(config, "DATABASE_URL", "") or "").strip()
         else:
             self.database_url = ""
+
+        if self.database_url:
+            # Escapa '%' literales en credenciales que no estén ya URL-encoded
+            self.database_url = re.sub(r"%(?![0-9A-Fa-f]{2})", "%25", self.database_url)
 
         self.is_postgres = bool(self.database_url)
         if not self.is_postgres:
